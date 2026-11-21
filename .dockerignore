@@ -1,0 +1,17 @@
+**/node_modules
+**/dist
+**/.env*
+**/.git
+
+# Test output
+**/coverage
+
+# Not needed by the api image
+terraform
+deploy
+
+# Editor and OS junk
+.vscode
+**/.DS_Store
+**/Thumbs.db
+**/*.log
