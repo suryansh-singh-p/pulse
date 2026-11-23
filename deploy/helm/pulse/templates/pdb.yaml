@@ -1,0 +1,15 @@
+{{- if .Values.pdb.enabled }}
+# Blocks voluntary evictions (e.g. node drain) that would leave fewer than
+# minAvailable api pods. Does not protect against crashes or rolling updates.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "pulse.fullname" . }}
+  labels:
+    {{- include "pulse.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "pulse.selectorLabels" . | nindent 6 }}
+{{- end }}

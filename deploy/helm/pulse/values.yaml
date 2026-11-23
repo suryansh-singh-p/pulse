@@ -1,0 +1,99 @@
+# Default values for the pulse api chart.
+# Environment files (e.g. values-dev.yaml) override only what differs.
+
+replicaCount: 2 # ignored when autoscaling.enabled is true (the HPA owns replicas)
+
+image:
+  repository: pulse-api
+  # IfNotPresent: use the image already on the node (loaded with `kind load`).
+  pullPolicy: IfNotPresent
+  # Empty = use appVersion from Chart.yaml.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+podAnnotations: {}
+podLabels: {}
+
+# Pod-level security. runAsUser matches USER 1000 in the Dockerfile.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+# Container-level security.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+service:
+  type: ClusterIP
+  port: 80 # what clients use: http://pulse:80
+  targetPort: 3000 # what the container listens on (the app's PORT)
+
+resources:
+  requests:
+    cpu: 100m # the HPA's 70% target is measured against this
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# Liveness failure restarts the container, so it is more forgiving than readiness.
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  periodSeconds: 10
+  timeoutSeconds: 2
+  failureThreshold: 3
+
+# Readiness failure only removes the pod from the Service.
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: http
+  periodSeconds: 5
+  timeoutSeconds: 2
+  failureThreshold: 2
+
+# Must be longer than the app's own 10 s shutdown timeout.
+terminationGracePeriodSeconds: 30
+
+# Non-secret settings, rendered into the ConfigMap. Names match what the app reads.
+env:
+  PORT: "3000"
+  REDIS_URL: redis://redis:6379
+  S3_ENDPOINT: http://minio:9000
+  S3_BUCKET: pulse-events
+  LOG_LEVEL: info
+  KAFKA_BROKERS: kafka:9092 # Kafka arrives later; the app only checks the format for now
+
+# Secret settings, rendered into the Secret. Never commit real values:
+# pass them at install time with --set s3.accessKey=... --set s3.secretKey=...
+s3:
+  accessKey: ""
+  secretKey: ""
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+  # targetMemoryUtilizationPercentage: 80
+
+pdb:
+  enabled: false
+  minAvailable: 1
+
+volumes: []
+volumeMounts: []
+nodeSelector: {}
+tolerations: []
+affinity: {}

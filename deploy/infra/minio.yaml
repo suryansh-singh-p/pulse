@@ -1,0 +1,89 @@
+# MinIO (S3-compatible storage) for pulse: 1 replica with persistent storage.
+# API: minio:9000   Console: minio:9001
+# Needs the Secret minio-credentials (keys rootUser, rootPassword), created with kubectl.
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  labels:
+    app.kubernetes.io/name: minio
+spec:
+  clusterIP: None # headless, like redis
+  selector:
+    app.kubernetes.io/name: minio
+  ports:
+    - name: api
+      port: 9000
+      targetPort: api
+    - name: console
+      port: 9001
+      targetPort: console
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: minio
+  labels:
+    app.kubernetes.io/name: minio
+spec:
+  serviceName: minio
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: minio
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minio
+    spec:
+      # Bitnami images run as user 1001; fsGroup lets that user write to the volume.
+      securityContext:
+        runAsUser: 1001
+        fsGroup: 1001
+      containers:
+        - name: minio
+          # Official minio/minio images are no longer pullable; this is MinIO
+          # packaged by Bitnami (frozen "legacy" repo). Fine for local use.
+          # Its entrypoint starts the server: API on 9000, console on 9001.
+          image: bitnamilegacy/minio:2025.7.23-debian-12-r5
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: rootUser
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: rootPassword
+          ports:
+            - name: api
+              containerPort: 9000
+            - name: console
+              containerPort: 9001
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: api
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /bitnami/minio/data # Bitnami's data directory
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi

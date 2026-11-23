@@ -1,0 +1,11 @@
+{{ include "pulse.fullname" . }} is deployed (release {{ .Release.Name }}, revision {{ .Release.Revision }}) in namespace {{ .Release.Namespace }}.
+
+Watch the pods become Ready:
+  kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }} -w
+
+Reach the API on http://localhost:3000:
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "pulse.fullname" . }} 3000:{{ .Values.service.port }}
+
+Then try:
+  curl localhost:3000/healthz
+  curl localhost:3000/readyz

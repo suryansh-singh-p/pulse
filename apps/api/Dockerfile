@@ -34,7 +34,7 @@ COPY --from=build /app/packages/shared/dist packages/shared/dist
 COPY --from=build /app/apps/api/dist apps/api/dist
 
 # Run as the unprivileged user that ships with the node image.
-USER node
+USER 1000
 
 # Documents the port the api listens on (doesn't publish it).
 EXPOSE 3000

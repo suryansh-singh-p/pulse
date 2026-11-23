@@ -1,0 +1,24 @@
+# Overrides for the local kind cluster. Only what differs from values.yaml.
+# Install: helm upgrade --install pulse deploy/helm/pulse -n pulse -f deploy/helm/pulse/values-dev.yaml \
+#            --set s3.accessKey=<minio user> --set s3.secretKey=<minio password>
+
+image:
+  tag: dev
+
+# Smaller footprint: the whole cluster runs on one laptop.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 192Mi
+
+env:
+  LOG_LEVEL: debug
+
+autoscaling:
+  enabled: true
+
+pdb:
+  enabled: true
