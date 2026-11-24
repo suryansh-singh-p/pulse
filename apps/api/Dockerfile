@@ -1,5 +1,5 @@
 # ---- Build stage: install all deps and compile TypeScript ----
-FROM node:24.15.0-bookworm-slim AS build
+FROM node:24.22.3-bookworm-slim AS build
 
 # Creates /app if needed; later instructions run here.
 WORKDIR /app
@@ -18,7 +18,7 @@ COPY . .
 RUN npm run build
 
 # ---- Runtime stage: only what's needed to run the api ----
-FROM node:24.15.0-bookworm-slim AS runtime
+FROM node:24.22.3-bookworm-slim AS runtime
 ENV NODE_ENV=production
 
 WORKDIR /app
