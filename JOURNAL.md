@@ -100,6 +100,55 @@
 - **Why:** the PVC outlives the pod (and even the StatefulSet), and Redis's append-only file writes every change to `/data`. On kind the volume is a folder on one node, so the PV pins `redis-0` to that node.
 - **Lesson:** stable name + stable storage is what a StatefulSet adds over a Deployment. A Deployment without a PVC would lose the data on every restart. Deleting the StatefulSet keeps PVCs on purpose; data is only gone when the PVC itself is deleted.
 
+## 2026-11-24 — AWS and Terraform: S3 events bucket and least-privilege IAM
+
+**Built**
+
+- AWS account (AWS (new) plan) with root MFA, an admin IAM user `suryansh-admin` with an access key, used through the CLI profile `pulse-admin` (`$env:AWS_PROFILE`, never in code).
+- `terraform/` root module:
+  - `versions.tf`: Terraform `>= 1.17`, AWS provider `~> 6.0`. `.terraform.lock.hcl` committed so every run uses the same provider build.
+  - `providers.tf`: region from a variable; `default_tags` (`project`, `env`, `owner`) on every resource.
+  - `variables.tf` + `dev.tfvars`: `region`, `env` (validated: `dev` or `prod`), `bucket_prefix`, `owner`; no defaults, so nothing is applied by accident.
+  - `main.tf`: `data "aws_caller_identity"` for the account ID → bucket name `pulse-events-dev-<account-id>` (bucket names are global).
+  - `iam.tf`: policy document with three statements: `PutObject`/`GetObject` on `raw/*`, `PutObject` only on `reports/*`, `ListBucket` on the bucket ARN limited by an `s3:prefix` condition to `raw/*` and `reports/*`. Attached to the IAM user `pulse-app`. The access key was created with the CLI, not Terraform, so the secret never entered state.
+  - `outputs.tf`: bucket name, bucket ARN, `pulse-app` user ARN.
+- `modules/bucket/`: the bucket with versioning, SSE-S3 (AES256), all four public-access-block settings, and lifecycle rules (`raw/` → Standard-IA at 30 days, expire at 90; noncurrent versions deleted after 30 days; expired delete markers removed; incomplete multipart uploads aborted after 7 days). The lifecycle rule `depends_on` versioning.
+- Committed the Terraform code (`0d90be1`) and tagged `m7`. State, plans and secrets are gitignored.
+
+**First plan**
+
+- 8 to add. Resources showed only their own arguments in `tags`, while `tags_all` listed the merged `default_tags`: that's how the provider shows tags applied from the provider block.
+- Data sources are read during plan (account ID known), but ARNs and IDs of new resources show `(known after apply)`.
+
+**Proving least privilege (as `pulse-app`)**
+
+- Allowed: write and read under `raw/`, write under `reports/`, list those prefixes.
+- Denied: `PutObject` at the bucket root, `DeleteObject`, `ListBuckets`. The error said "no identity-based policy allows the action": an **implicit deny**, because nothing allows it.
+- Different from the AWS (new) plan's org SCP, whose errors say "with an explicit deny in a service control policy". An explicit deny wins over any allow, even for an admin.
+- Evaluation order: default deny → an allow opens it → an explicit deny anywhere closes it again.
+
+**Drift**
+
+- Changed a tag on the bucket by hand in the console. `terraform plan` reported the resource as "changed outside of Terraform" and planned 1 to change, back to the code's value. `apply` reverted it.
+- Lesson: Terraform compares code, state and real infrastructure on every plan; manual console changes get undone. `terraform plan -refresh-only` shows drift without proposing changes.
+
+**Module refactor**
+
+- Moved the five bucket resources into `modules/bucket` with `moved` blocks in `main.tf` (`aws_s3_bucket.events` → `module.events_bucket.aws_s3_bucket.this`, and so on). Plan: 0 to add, 0 to destroy. Without `moved`, Terraform would have destroyed and recreated the bucket.
+- The module declares `required_providers` without a version; the root sets the version and the configured provider (region, tags) is inherited.
+- `moved` blocks are reviewable in a PR and work for everyone; `terraform state mv` is a one-off local command.
+
+**Cleanup**
+
+- A versioned bucket isn't empty until every version and delete marker is gone, so `delete-object --version-id` for each, then `terraform destroy` (force_destroy stays false on purpose). Deleted the `pulse-app` access key and user. Checked: state empty, no buckets, no customer-managed policies.
+
+**Gotchas**
+
+- AWS (new) plan: the region is fixed to `ap-southeast-2`; IAM Identity Center isn't available; an AWS-owned SCP explicitly denies `iam:GetLoginProfile`, so IAM users can't get a console password. The admin user works through an access key only.
+- PowerShell 5.1 splits `-var-file=dev.tfvars` at the dot; quote it: `"-var-file=dev.tfvars"`.
+- A stray `3441` after a string in `iam.tf` broke `terraform validate`; run validate before plan.
+- Never commit `*.tfstate`: state holds every attribute in plain text, and would hold secrets if any were created in Terraform.
+
 ## 2026-11-25 — CI/CD with GitHub Actions and GHCR
 
 **Built**
@@ -144,4 +193,5 @@
 - Add Dependabot (npm, Dockerfile base image, GitHub Actions) so stale pins arrive as PRs.
 - `release.yaml` runs in parallel with CI on `main` and doesn't wait for it.
 - `*.test.ts` files are excluded from tsconfig, so their types are never checked.
-- Journal entry for the Terraform day (2026-11-24) not written yet.
+- Terraform state is local; move it to a remote backend (S3 with locking) before anyone else runs it.
+- `suryansh-admin`'s access key is full admin with no expiry: deactivate it when AWS isn't in use.
