@@ -1,0 +1,56 @@
+# Release: publishes the api image to GHCR for every commit that lands on main.
+# PRs never run this workflow, so only merged code is ever published.
+name: release
+
+on:
+  push:
+    branches: [main]
+
+# The GITHUB_TOKEN gets exactly these and nothing else.
+permissions:
+  contents: read # actions/checkout reads the code
+  packages: write # push images to ghcr.io
+
+# Two quick merges: let each release finish rather than cancel one mid-push.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Registry paths must be lowercase; this owner name already is.
+  IMAGE: ghcr.io/${{ github.repository_owner }}/pulse-api
+
+jobs:
+  push-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      # Must come before the push: GHCR rejects anonymous pushes.
+      # GITHUB_TOKEN is created for this run and expires when it ends; no stored secret.
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push api image
+        uses: docker/build-push-action@v7
+        with:
+          context: . # same build as ci.yaml, so the same image
+          file: apps/api/Dockerfile
+          push: true
+          # SHA: immutable, what ArgoCD deploys. main: moves, for quick manual pulls.
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:main
+          # Links the package to this repo on GitHub.
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
