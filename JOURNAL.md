@@ -100,9 +100,48 @@
 - **Why:** the PVC outlives the pod (and even the StatefulSet), and Redis's append-only file writes every change to `/data`. On kind the volume is a folder on one node, so the PV pins `redis-0` to that node.
 - **Lesson:** stable name + stable storage is what a StatefulSet adds over a Deployment. A Deployment without a PVC would lose the data on every restart. Deleting the StatefulSet keeps PVCs on purpose; data is only gone when the PVC itself is deleted.
 
+## 2026-11-25 — CI/CD with GitHub Actions and GHCR
+
+**Built**
+
+- `typecheck` scripts: each workspace runs `tsc --noEmit`; the root builds `@pulse/shared` first, then type-checks all workspaces.
+- `.github/workflows/ci.yaml` on PRs to `main` and pushes to `main`, with `permissions: contents: read`:
+  - `test`: checkout → setup-node (version from `.nvmrc`, npm cache) → `npm ci` → lint → typecheck → test → build, each its own step.
+  - `image` (`needs: test`): Buildx → build from the repo root with `-f apps/api/Dockerfile`, `load: true`, no push, GHA layer cache (`mode=max`) → Trivy (vulnerabilities only, CRITICAL, ignore unfixed, `exit-code 1`). Trivy pinned to a commit SHA; official actions by major tag.
+- `.github/workflows/release.yaml` on pushes to `main` only, with `contents: read` + `packages: write`: login to `ghcr.io` with `GITHUB_TOKEN` → build and push `ghcr.io/suryansh-singh-p/pulse-api` tagged with the commit SHA and `main`, OCI `source` and `revision` labels.
+- PR #1 squash-merged. First image: `pulse-api:8d03fac3df0974e8e52974edf0ade0f5a39c6f9a` (for `values-dev.yaml` in H7). Anonymous `docker pull` works.
+- Branch ruleset on `main`: PR required (0 approvals, solo), status checks `test` + `image` from GitHub Actions, branches up to date, no force pushes or deletions, empty bypass list.
+
+**Broke in CI but worked locally**
+
+- **No `dist/` on a fresh clone.** `@pulse/shared` resolves to `dist/index.d.ts` and `dist/index.js`, which are gitignored. Locally they were left over from old builds; in CI the api's typecheck and tests would fail with "Cannot find module". Fix: root `typecheck` builds shared first. Caught by deleting `dist/` and running `npm ci` and all four steps locally before pushing.
+- **Trivy: 6 CRITICAL in the image, none in our code.** 5 in Debian packages (`libgnutls30`, `perl-base`) and 1 in npm's own bundled `tar` (`/usr/local/lib/node_modules/npm/...`). All came from the pinned `node:24.15.0-bookworm-slim`: old tags stop getting OS patches. Fix: bumped to `node:24.22.3-bookworm-slim` and `.nvmrc` to match; verified locally with `aquasec/trivy:0.76.2` before pushing. Not fixed by lowering the severity or a `.trivyignore`.
+
+**Learned**
+
+- Jobs run on separate fresh VMs and share nothing; `needs` orders them and skips the dependant when one fails.
+- A pushed commit to a branch with an open PR re-runs CI (`synchronize`); a push to a branch with no PR runs nothing (only `pull_request` and `push` to `main` are triggers). `pull_request` runs are titled with the PR title, not the commit.
+- CI never merges and a red check blocks nothing until branch protection makes it required (PR #1 showed `MERGEABLE` while red).
+- A job skipped because of a failed `needs` counts as passing for required checks, so require `test` itself, not just `image`.
+- `GITHUB_TOKEN` is created per run and expires with it; listing `permissions` turns everything unlisted off. PR runs never publish.
+- A package pushed from a workflow with `GITHUB_TOKEN` is linked to the repo and inherits its visibility (public repo → public package). Pushed with a personal token, it starts private.
+- Deploy by SHA tag (immutable, traceable, easy rollback), not `main`/`latest`.
+- Pin for reproducibility, scan to find out when the pin has gone stale, then bump.
+
+**Gotchas**
+
+- The ruleset ended up with "Restrict creations" and "Restrict updates" ticked, which would have blocked every merge (merging updates `main`). The UI looked right; `gh api repos/<owner>/<repo>/rules/branches/main` showed the real rules.
+- In a solo repo, required approvals must be 0: you can't approve your own PR.
+- With `main` protected, even journal changes go through a PR.
+- kind nodes are Docker containers with a restart policy, so the cluster comes back (and uses ~1.3 GB RAM) whenever Docker Desktop starts. `docker stop`/`docker start` keeps everything; `kind delete cluster` wipes it.
+
 ## Open items
 
 - App ignores `LOG_LEVEL` (not in the config schema; Fastify logger is fixed at info).
 - `/readyz` doesn't check Redis or Kafka yet; `/stats` returns `{}`.
 - Decide on `prom-client` vs `@prometheus-io/client`.
 - Bitnami legacy MinIO images get no updates; revisit before anything beyond local.
+- Add Dependabot (npm, Dockerfile base image, GitHub Actions) so stale pins arrive as PRs.
+- `release.yaml` runs in parallel with CI on `main` and doesn't wait for it.
+- `*.test.ts` files are excluded from tsconfig, so their types are never checked.
+- Journal entry for the Terraform day (2026-11-24) not written yet.
