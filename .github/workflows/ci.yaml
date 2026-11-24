@@ -1,0 +1,76 @@
+# CI: proves every change builds, passes checks and produces a safe image.
+# Runs before a PR merges (pull_request) and again after it lands (push to main).
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Least privilege for the GITHUB_TOKEN: this workflow only reads the code.
+permissions:
+  contents: read
+
+# A new push to the same PR cancels the run still going for the old commit.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # The runner starts empty; fetch the repo first.
+      - uses: actions/checkout@v7
+
+      # Node version comes from .nvmrc, so laptop and CI always match.
+      # cache: npm stores ~/.npm keyed on package-lock.json's hash.
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      # Exact install from the lockfile; fails if it doesn't match package.json.
+      - run: npm ci
+
+      # Cheapest checks first; separate steps so the UI names the one that failed.
+      - run: npm run lint
+      - run: npm run typecheck # also builds @pulse/shared, which test needs
+      - run: npm run test
+      - run: npm run build
+
+  image:
+    # Only build an image of code that passed the checks.
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # New VM: nothing from the test job is here.
+      - uses: actions/checkout@v7
+
+      # BuildKit builder; needed for the GitHub Actions cache (type=gha).
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build api image
+        uses: docker/build-push-action@v7
+        with:
+          context: . # repo root: the Dockerfile copies the lockfile and both workspaces
+          file: apps/api/Dockerfile
+          tags: pulse-api:ci # local name for the scan below
+          load: true # put the image in this runner's Docker so Trivy can see it
+          push: false # PR images never reach the registry
+          cache-from: type=gha
+          cache-to: type=gha,mode=max # mode=max also caches the build stage's layers
+
+      # Third-party action pinned to a full commit SHA (v0.36.0): a tag can be
+      # moved to different code, a commit SHA cannot.
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: pulse-api:ci
+          scanners: vuln # vulnerabilities only (not secret or config scanning)
+          severity: CRITICAL
+          ignore-unfixed: true # nothing to do about a CVE with no fixed version yet
+          exit-code: "1" # default is 0 (report only); 1 fails the job on findings
