@@ -75,9 +75,13 @@ env:
   LOG_LEVEL: info
   KAFKA_BROKERS: kafka:9092 # Kafka arrives later; the app only checks the format for now
 
-# Secret settings, rendered into the Secret. Never commit real values:
-# pass them at install time with --set s3.accessKey=... --set s3.secretKey=...
+# S3 credentials. Two ways to provide them; never commit real values:
+# 1. existingSecret: name of a Secret created outside the chart, with keys
+#    AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY. The chart then renders no Secret.
+#    Used with ArgoCD, which only sees Git and so can't get --set values.
+# 2. Leave existingSecret empty and pass --set s3.accessKey=... --set s3.secretKey=...
 s3:
+  existingSecret: ""
   accessKey: ""
   secretKey: ""
 

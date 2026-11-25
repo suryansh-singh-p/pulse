@@ -1,9 +1,19 @@
 # Overrides for the local kind cluster. Only what differs from values.yaml.
-# Install: helm upgrade --install pulse deploy/helm/pulse -n pulse -f deploy/helm/pulse/values-dev.yaml \
-#            --set s3.accessKey=<minio user> --set s3.secretKey=<minio password>
+# Deployed by ArgoCD (deploy/argocd/application.yaml) from main: change this file
+# through a PR, never with helm or kubectl.
+# Needs the Secret pulse-s3 in namespace pulse (created by hand, never in Git):
+#   kubectl create secret generic pulse-s3 -n pulse \
+#     --from-literal=AWS_ACCESS_KEY_ID=<minio user> --from-literal=AWS_SECRET_ACCESS_KEY=<minio password>
 
 image:
-  tag: dev
+  repository: ghcr.io/suryansh-singh-p/pulse-api
+  # Commit SHA built by release.yaml. Deploy = change this; rollback = git revert.
+  tag: 8d03fac3df0974e8e52974edf0ade0f5a39c6f9a
+  # The SHA tag never changes, so pulling once per node is enough.
+  pullPolicy: IfNotPresent
+
+s3:
+  existingSecret: pulse-s3
 
 # Smaller footprint: the whole cluster runs on one laptop.
 resources:
@@ -17,8 +27,9 @@ resources:
 env:
   LOG_LEVEL: debug
 
+# Off so Git owns the replica count (replicaCount in values.yaml) for the GitOps drills.
 autoscaling:
-  enabled: true
+  enabled: false
 
 pdb:
   enabled: true

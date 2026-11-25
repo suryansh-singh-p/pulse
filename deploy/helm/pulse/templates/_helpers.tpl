@@ -60,3 +60,11 @@ Create the name of the service account to use
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Name of the Secret holding the S3 credentials: the existing one if given,
+otherwise the one this chart renders.
+*/}}
+{{- define "pulse.s3SecretName" -}}
+{{- default (printf "%s-s3" (include "pulse.fullname" .)) .Values.s3.existingSecret }}
+{{- end }}
