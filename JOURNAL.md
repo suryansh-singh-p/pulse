@@ -184,6 +184,75 @@
 - With `main` protected, even journal changes go through a PR.
 - kind nodes are Docker containers with a restart policy, so the cluster comes back (and uses ~1.3 GB RAM) whenever Docker Desktop starts. `docker stop`/`docker start` keeps everything; `kind delete cluster` wipes it.
 
+## 2026-11-25 — GitOps with ArgoCD
+
+**Built**
+
+- ArgoCD v3.6.3 in namespace `argocd` from the pinned install manifest (not `stable`), UI through `kubectl port-forward svc/argocd-server -n argocd 8080:443`, initial admin password from `argocd-initial-admin-secret`.
+- Chart: `s3.existingSecret`. When set, the chart renders no Secret and the Deployment's `secretRef` points at the named one (helper `pulse.s3SecretName`); `checksum/secret` is skipped because Helm can't hash a Secret it never sees. The old `--set s3.accessKey=...` path still works.
+- `values-dev.yaml`: image `ghcr.io/suryansh-singh-p/pulse-api` at SHA `8d03fac…` with `IfNotPresent`, `existingSecret: pulse-s3`, HPA off so Git owns the replica count.
+- `deploy/argocd/application.yaml`: Application `pulse` in `argocd`; source = this repo, `main`, `deploy/helm/pulse`, `values-dev.yaml`; destination = `https://kubernetes.default.svc`, namespace `pulse`; automated sync with `prune` and `selfHeal`, `CreateNamespace=true`, and the resources finalizer.
+- Handover: chart changes merged first (PR #4), then `helm uninstall pulse -n pulse`, then `pulse-s3` recreated by hand from `minio-credentials` (decoded into variables, never printed), then one `kubectl apply` of the Application. Synced and Healthy; `/healthz` OK through `port-forward svc/pulse`.
+
+**Pull-based GitOps vs CI pushing**
+
+- Push: CI (or a laptop) runs `kubectl`/`helm` against the cluster. It needs cluster credentials outside the cluster, deploys only when it runs, and doesn't notice manual changes afterwards.
+- Pull: a controller inside the cluster compares Git with the cluster and applies the difference. No cluster credentials leave the cluster, Git is the single source of truth, deploy = merge, rollback = `git revert`, and manual changes are reverted.
+- CI and CD are decoupled: CI builds and publishes an image for every merge; nothing deploys until a PR changes the tag in `values-dev.yaml`.
+- Git is polled (about every 3 minutes, or Refresh in the UI); the cluster is watched live, so drift in the cluster is seen immediately.
+- Helm's role changed: ArgoCD still uses it to render the chart, but applies and tracks the objects itself. There is no Helm release, so `helm list` is empty, and history and rollback live in Git.
+
+**Drills**
+
+### Drill — Deploy through Git
+
+- **Action:** add `replicaCount: 3` to `values-dev.yaml`, PR, merge; Refresh in the UI.
+- **Expected:** app OutOfSync for a moment, then a third pod. Same ReplicaSet and `rev:1`: replicas aren't part of the pod template, so it's a scale, not a rollout.
+- **Lesson:** Git is the control panel; no kubectl needed.
+
+### Drill — Self-heal
+
+- **Action:** `kubectl scale deploy/pulse -n pulse --replicas=1`.
+- **Expected:** ArgoCD sees the drift within seconds (it watches the cluster), shows OutOfSync, and scales back to the Git value.
+- **Lesson:** with `selfHeal`, a manual change lasts seconds. With the HPA on, the HPA would reset it instead, which is why it's off for these drills.
+
+### Drill — Ship a new version
+
+- **Action:** add a `version` field to `/healthz` (e.g. the commit SHA passed as a build arg), merge; `release.yaml` pushes a new image; put its SHA in `values-dev.yaml`, merge.
+- **Expected:** a new ReplicaSet (new pod-template hash, `rev:2`); pods replaced one at a time (maxSurge 1, maxUnavailable 0); `/healthz` reports the new version.
+- **Lesson:** two PRs, two decisions: build the artifact, then choose to deploy it.
+
+### Drill — Roll back through Git
+
+- **Action:** `git revert` the tag-bump commit on a branch, PR, merge.
+- **Expected:** the old tag is back in Git; ArgoCD rolls the Deployment back to the previous image, reusing the old ReplicaSet.
+- **Lesson:** rollback is just another commit, reviewed and recorded like any change.
+
+### Drill — Bad deploy
+
+- **Action:** set `image.tag` to a tag that doesn't exist, PR, merge.
+- **Expected:** the new pod goes `ErrImagePull` → `ImagePullBackOff`; app Synced (cluster matches Git) but not Healthy: Progressing, then Degraded once the Deployment's progress deadline (600 s) passes. The old pods keep serving because maxUnavailable is 0. Fix with `git revert`.
+- **Lesson:** sync status and health are separate questions; a bad deploy is visible and safe, not an outage.
+
+### Drill — Prune
+
+- **Action:** set `pdb.enabled: false` in `values-dev.yaml`, PR, merge.
+- **Expected:** the chart no longer renders the PDB, and ArgoCD deletes it from the cluster. Without `prune: true` it would stay, marked as needing pruning.
+- **Lesson:** deleting from Git deletes from the cluster; nothing lingers unmanaged.
+
+**Gotchas**
+
+- The chart's `required` S3 keys came from `--set` at install. ArgoCD renders only from Git, so the sync would have failed with "set s3.accessKey". Fixed with `existingSecret`, not by committing keys.
+- With the HPA on, the template leaves out `replicas`, so `replicaCount` in Git would be ignored and the HPA, not ArgoCD, would undo a manual scale.
+- The Application's name is the Helm release name; it has to be `pulse` to keep object names (`Deployment pulse`, `Service pulse`).
+- `valueFiles` is relative to `source.path`, not the repo root.
+- ArgoCD's CRDs exceed the 256 KB `last-applied-configuration` annotation: install with `kubectl apply --server-side --force-conflicts`.
+- The namespace must be `argocd`: the manifest's ClusterRoleBindings refer to service accounts there.
+- Order matters: Git first (ArgoCD reads `main`), then uninstall the Helm release (one owner per object), then the Secret (pods need it to start), then the Application. The api is down between uninstall and the first sync.
+- `helm uninstall` also deleted the chart-made `pulse-s3` Secret.
+- Pods showed `running 0/1` for the first seconds: readiness got "connection refused" while Node started, then `/readyz` returned 200.
+- Public repo and public GHCR package: no repo credentials and no `imagePullSecrets` needed.
+
 ## Open items
 
 - App ignores `LOG_LEVEL` (not in the config schema; Fastify logger is fixed at info).
@@ -195,3 +264,7 @@
 - `*.test.ts` files are excluded from tsconfig, so their types are never checked.
 - Terraform state is local; move it to a remote backend (S3 with locking) before anyone else runs it.
 - `suryansh-admin`'s access key is full admin with no expiry: deactivate it when AWS isn't in use.
+- `pulse-s3` is created by hand; replace with Sealed Secrets or External Secrets Operator so it's reproducible from Git.
+- HPA is off in dev for the GitOps drills; turn it back on (with `replicas` left out of Git).
+- ArgoCD itself was installed with kubectl; manage it from Git too (app-of-apps), along with Redis and MinIO.
+- Change the ArgoCD admin password (or disable admin and use SSO) and delete `argocd-initial-admin-secret`.
