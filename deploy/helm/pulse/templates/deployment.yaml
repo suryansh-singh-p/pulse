@@ -23,7 +23,11 @@ spec:
         # Config or secret changes alter these hashes, which changes the pod
         # template and triggers a rollout (pods only read env at startup).
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if not .Values.s3.existingSecret }}
+        # An existing Secret isn't rendered here, so its changes can't be hashed:
+        # after changing it, run kubectl rollout restart.
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -68,7 +72,7 @@ spec:
             - configMapRef:
                 name: {{ include "pulse.fullname" . }}-config
             - secretRef:
-                name: {{ include "pulse.fullname" . }}-s3
+                name: {{ include "pulse.s3SecretName" . }}
           lifecycle:
             # Keep serving while the pod is removed from Service endpoints,
             # then SIGTERM starts the app's graceful shutdown.

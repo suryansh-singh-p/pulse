@@ -1,0 +1,30 @@
+# Tells ArgoCD to deploy the pulse Helm chart from this repo's main branch and keep
+# the cluster matching it. Applied once with kubectl; after that, deploy through Git.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  # Also the Helm release name, so objects keep their names (Deployment pulse, Service pulse).
+  name: pulse
+  # Application objects live where ArgoCD runs, not where the app runs.
+  namespace: argocd
+  # Deleting this Application also deletes the objects it created.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/suryansh-singh-p/pulse.git
+    targetRevision: main
+    path: deploy/helm/pulse # folder with Chart.yaml
+    helm:
+      valueFiles:
+        - values-dev.yaml # relative to path, not the repo root
+  destination:
+    server: https://kubernetes.default.svc # this same cluster
+    namespace: pulse
+  syncPolicy:
+    automated:
+      prune: true # removed from Git -> removed from the cluster
+      selfHeal: true # changed in the cluster -> changed back to Git
+    syncOptions:
+      - CreateNamespace=true
