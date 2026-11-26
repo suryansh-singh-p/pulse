@@ -8,7 +8,7 @@
 image:
   repository: ghcr.io/suryansh-singh-p/pulse-api
   # Commit SHA built by release.yaml. Deploy = change this; rollback = git revert.
-  tag: c53e33bdc807b5b68265263a3181798efc49c684
+  tag: 0f5c4491cbbb34867bae323e6065cc258385aec1
   # The SHA tag never changes, so pulling once per node is enough.
   pullPolicy: IfNotPresent
 
