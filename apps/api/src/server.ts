@@ -2,8 +2,9 @@ import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyServerOptions } from "fastify";
 import { Counter, Histogram, Registry, collectDefaultMetrics } from "prom-client";
 import { EventIn, type StoredEvent } from "@pulse/shared";
+import type { Deps } from "./deps.js";
 
-export function buildServer(opts: FastifyServerOptions = {}) {
+export function buildServer(deps: Deps, opts: FastifyServerOptions = {}) {
   const app = Fastify(opts);
 
   // One registry per server, so tests can build several without duplicate-metric errors.
@@ -23,6 +24,12 @@ export function buildServer(opts: FastifyServerOptions = {}) {
     buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5],
     registers: [registry],
   });
+  const published = new Counter({
+    name: "events_published_total",
+    help: "Events handed to Kafka, by result",
+    labelNames: ["result"],
+    registers: [registry],
+  });
 
   app.addHook("onResponse", async (req, reply) => {
     // Use the route template (e.g. /events), not the raw URL, to keep label cardinality low.
@@ -38,8 +45,21 @@ export function buildServer(opts: FastifyServerOptions = {}) {
   // Liveness: the process is up.
   app.get("/healthz", async () => ({ status: "ok" }));
 
-  // Readiness: TODO check Redis and Kafka.
-  app.get("/readyz", async () => ({ status: "ready" }));
+  // Readiness: every dependency must answer. Checks run in parallel, each with its own timeout.
+  app.get("/readyz", async (_req, reply) => {
+    const names = Object.keys(deps.checks);
+    const results = await Promise.allSettled(names.map((name) => deps.checks[name]!()));
+    const failed: Record<string, string> = {};
+    results.forEach((result, i) => {
+      if (result.status === "rejected") {
+        failed[names[i]!] = String((result.reason as Error)?.message ?? result.reason);
+      }
+    });
+    if (Object.keys(failed).length > 0) {
+      return reply.code(503).send({ status: "not ready", failed });
+    }
+    return { status: "ready" };
+  });
 
   app.get("/metrics", async (_req, reply) => {
     reply.type(registry.contentType);
@@ -56,13 +76,35 @@ export function buildServer(opts: FastifyServerOptions = {}) {
       id: randomUUID(),
       receivedAt: new Date().toISOString(),
     };
-    // TODO: produce to Kafka. Stubbed for now.
-    req.log.info({ event }, "event accepted");
+    try {
+      // 202 only after Kafka has acknowledged: the event is stored, not just received.
+      await deps.publisher.publish(event);
+    } catch (err) {
+      published.inc({ result: "error" });
+      req.log.error({ err, eventId: event.id }, "publish to kafka failed");
+      // 503 = temporary, not the client's fault; Retry-After hints when to try again.
+      return reply
+        .code(503)
+        .header("retry-after", "5")
+        .send({ error: "event pipeline unavailable, retry later" });
+    }
+    published.inc({ result: "ok" });
+    req.log.debug({ eventId: event.id }, "event published");
     return reply.code(202).send({ id: event.id, receivedAt: event.receivedAt });
   });
 
-  // TODO: real stats.
-  app.get("/stats", async () => ({}));
+  // Counts per event type, maintained by the worker in Redis. Lags behind POST /events
+  // by up to the worker's flush interval, and may over-count slightly (at-least-once).
+  app.get("/stats", async (req, reply) => {
+    try {
+      const counts = await deps.stats.counts();
+      const total = Object.values(counts).reduce((sum, n) => sum + n, 0);
+      return { counts, total };
+    } catch (err) {
+      req.log.error({ err }, "reading stats failed");
+      return reply.code(503).send({ error: "stats unavailable, retry later" });
+    }
+  });
 
   return app;
 }

@@ -15,7 +15,9 @@ RUN npm ci
 
 COPY . . 
 
-RUN npm run build
+# Build only what this image needs. A plain `npm run build` builds every app,
+# and the other apps' dependencies aren't installed here.
+RUN npm run build -w @pulse/shared && npm run build -w @pulse/api
 
 # ---- Runtime stage: only what's needed to run the api ----
 FROM node:24.22.3-bookworm-slim AS runtime
