@@ -33,3 +33,13 @@ autoscaling:
 
 pdb:
   enabled: true
+
+worker:
+  # Off until image.tag points at a commit that has a pulse-worker image
+  # (the worker image was first built with PR #6). Switched on with the tag bump.
+  enabled: false
+  replicaCount: 2 # 3 partitions split 2 + 1 between the two workers
+  image:
+    repository: ghcr.io/suryansh-singh-p/pulse-worker
+  env:
+    FLUSH_INTERVAL_MS: "10000" # files appear in MinIO within 10 s: easier to show

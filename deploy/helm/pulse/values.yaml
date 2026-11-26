@@ -1,4 +1,4 @@
-# Default values for the pulse api chart.
+# Default values for the pulse chart (api, and the worker when worker.enabled).
 # Environment files (e.g. values-dev.yaml) override only what differs.
 
 replicaCount: 2 # ignored when autoscaling.enabled is true (the HPA owns replicas)
@@ -66,14 +66,16 @@ readinessProbe:
 # Must be longer than the app's own 10 s shutdown timeout.
 terminationGracePeriodSeconds: 30
 
-# Non-secret settings, rendered into the ConfigMap. Names match what the app reads.
+# Non-secret settings, rendered into the ConfigMap. Names match what the apps read.
+# Shared by the api and the worker.
 env:
   PORT: "3000"
+  KAFKA_BROKERS: kafka:9092
   REDIS_URL: redis://redis:6379
   S3_ENDPOINT: http://minio:9000
   S3_BUCKET: pulse-events
+  AWS_REGION: us-east-1 # the S3 SDK requires a region; MinIO ignores it
   LOG_LEVEL: info
-  KAFKA_BROKERS: kafka:9092 # Kafka arrives later; the app only checks the format for now
 
 # S3 credentials. Two ways to provide them; never commit real values:
 # 1. existingSecret: name of a Secret created outside the chart, with keys
@@ -95,6 +97,26 @@ autoscaling:
 pdb:
   enabled: false
   minAvailable: 1
+
+# The worker: a second Deployment from the same chart, using the same ConfigMap and Secret.
+worker:
+  enabled: false
+  replicaCount: 1 # at most 3, the number of partitions of events.raw
+  image:
+    repository: pulse-worker
+    tag: "" # empty = same tag as the api (image.tag): one release, one commit
+  # Longer than the worker's own 20 s shutdown timeout.
+  terminationGracePeriodSeconds: 30
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  # Worker-only environment variables (the code has defaults: BATCH_SIZE 500,
+  # FLUSH_INTERVAL_MS 30000).
+  env: {}
 
 volumes: []
 volumeMounts: []

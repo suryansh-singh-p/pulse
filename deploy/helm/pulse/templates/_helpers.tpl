@@ -51,6 +51,30 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+Worker: name and labels. The name label differs from the api's ("pulse-worker" vs
+"pulse") so the api's Service, PDB and Deployment never select worker pods.
+A selector matches every pod that has at least its labels, so sharing them would
+send HTTP traffic to the worker.
+*/}}
+{{- define "pulse.workerName" -}}
+{{- printf "%s-worker" (include "pulse.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "pulse.workerSelectorLabels" -}}
+app.kubernetes.io/name: {{ printf "%s-worker" (include "pulse.name" .) | trunc 63 | trimSuffix "-" }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{- define "pulse.workerLabels" -}}
+helm.sh/chart: {{ include "pulse.chart" . }}
+{{ include "pulse.workerSelectorLabels" . }}
+{{- if .Chart.AppVersion }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{- end }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}
+
+{{/*
 Create the name of the service account to use
 */}}
 {{- define "pulse.serviceAccountName" -}}

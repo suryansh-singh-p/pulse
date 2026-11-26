@@ -1,0 +1,69 @@
+{{- if .Values.worker.enabled }}
+# The worker: reads events from Kafka, counts them in Redis, writes files to S3/MinIO.
+# No Service and no port: nothing connects to it, it only connects out.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "pulse.workerName" . }}
+  labels:
+    {{- include "pulse.workerLabels" . | nindent 4 }}
+spec:
+  # Kafka gives each partition to one worker in the group: more workers than
+  # partitions (3) would sit idle.
+  replicas: {{ .Values.worker.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "pulse.workerSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Same ConfigMap as the api: a config change restarts the worker too.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+      labels:
+        {{- include "pulse.workerLabels" . | nindent 8 }}
+    spec:
+      # The worker stops in up to 20 s (pause, write to S3, commit, leave the group).
+      # This must be longer, or Kubernetes kills it mid-write.
+      terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Prefer workers on different nodes (soft: still schedules if it can't).
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "pulse.workerSelectorLabels" . | nindent 14 }}
+      containers:
+        - name: worker
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # Same tag as the api by default: both images are built from the same commit.
+          image: "{{ .Values.worker.image.repository }}:{{ .Values.worker.image.tag | default .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Same settings and credentials as the api (Kafka, Redis, S3).
+          envFrom:
+            - configMapRef:
+                name: {{ include "pulse.fullname" . }}-config
+            - secretRef:
+                name: {{ include "pulse.s3SecretName" . }}
+          {{- with .Values.worker.env }}
+          # Worker-only settings, e.g. BATCH_SIZE and FLUSH_INTERVAL_MS.
+          env:
+            {{- range $key, $value := . }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          {{- end }}
+          # No probes: the worker exits on any serious error and Kubernetes restarts it.
+          # Limitation: a worker that hangs without exiting would not be noticed.
+          {{- with .Values.worker.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}
