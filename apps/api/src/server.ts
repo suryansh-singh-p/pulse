@@ -93,8 +93,18 @@ export function buildServer(deps: Deps, opts: FastifyServerOptions = {}) {
     return reply.code(202).send({ id: event.id, receivedAt: event.receivedAt });
   });
 
-  // TODO: real stats.
-  app.get("/stats", async () => ({}));
+  // Counts per event type, maintained by the worker in Redis. Lags behind POST /events
+  // by up to the worker's flush interval, and may over-count slightly (at-least-once).
+  app.get("/stats", async (req, reply) => {
+    try {
+      const counts = await deps.stats.counts();
+      const total = Object.values(counts).reduce((sum, n) => sum + n, 0);
+      return { counts, total };
+    } catch (err) {
+      req.log.error({ err }, "reading stats failed");
+      return reply.code(503).send({ error: "stats unavailable, retry later" });
+    }
+  });
 
   return app;
 }

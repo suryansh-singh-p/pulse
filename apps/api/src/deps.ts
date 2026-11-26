@@ -11,7 +11,13 @@ export interface EventPublisher {
 /** A readiness check: resolves when the dependency is usable, rejects otherwise. */
 export type ReadinessCheck = () => Promise<void>;
 
+/** Reads the per-type event counts maintained by the worker. */
+export interface StatsReader {
+  counts(): Promise<Record<string, number>>;
+}
+
 export interface Deps {
   publisher: EventPublisher;
   checks: Record<string, ReadinessCheck>;
+  stats: StatsReader;
 }

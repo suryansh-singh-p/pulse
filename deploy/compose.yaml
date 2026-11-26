@@ -126,6 +126,36 @@ services:
       timeout: 3s
       retries: 5
 
+  worker:
+    build:
+      context: ..
+      dockerfile: apps/worker/Dockerfile
+    image: pulse-worker:compose
+    # Exits on a failed S3 write or Redis error (fail fast); Compose restarts it and
+    # Kafka redelivers everything after the last commit.
+    restart: on-failure
+    # Time between SIGTERM and SIGKILL: enough for the final flush and commit.
+    stop_grace_period: 30s
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      REDIS_URL: redis://redis:6379
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: pulse-events
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      BATCH_SIZE: "500"
+      FLUSH_INTERVAL_MS: "30000"
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    # No ports and no container_name: it serves no traffic, and Part 5 scales it
+    # with --scale worker=2 (fixed names would clash).
+
 volumes:
   redis-data:
   minio-data:

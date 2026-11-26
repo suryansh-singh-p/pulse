@@ -1,8 +1,7 @@
 import { Kafka, Partitioners, logLevel, type Admin, type Producer } from "kafkajs";
+import { EVENTS_TOPIC } from "@pulse/shared";
 import type { EventPublisher, ReadinessCheck } from "./deps.js";
 import { withTimeout } from "./timeout.js";
-
-export const EVENTS_TOPIC = "events.raw";
 
 /** Max time a POST /events waits for Kafka's ack before answering 503. */
 const SEND_TIMEOUT_MS = 3_000;

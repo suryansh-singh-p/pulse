@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Producer, ProducerRecord } from "kafkajs";
-import type { StoredEvent } from "@pulse/shared";
-import { EVENTS_TOPIC, kafkaPublisher } from "./kafka.js";
+import { EVENTS_TOPIC, type StoredEvent } from "@pulse/shared";
+import { kafkaPublisher } from "./kafka.js";
 
 const event: StoredEvent = {
   id: "0b6e2a4e-6a43-4c3b-9d3f-2f0f4c2a1b11",

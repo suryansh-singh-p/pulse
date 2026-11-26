@@ -16,6 +16,7 @@ function fakeDeps(overrides: Partial<Deps> = {}) {
       },
     },
     checks: { kafka: async () => {}, redis: async () => {} },
+    stats: { counts: async () => ({}) },
     ...overrides,
   };
   return { deps, published };
@@ -93,9 +94,29 @@ describe("api", () => {
     expect(published).toHaveLength(0);
   });
 
-  it("stats returns an empty object", async () => {
+  it("stats returns the counts and their total", async () => {
+    const { deps } = fakeDeps({ stats: { counts: async () => ({ click: 6, purchase: 2 }) } });
+    app = buildServer(deps);
+    const res = await app.inject("/stats");
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ counts: { click: 6, purchase: 2 }, total: 8 });
+  });
+
+  it("stats returns zero before anything has been counted", async () => {
     app = buildServer(fakeDeps().deps);
-    expect((await app.inject("/stats")).json()).toEqual({});
+    expect((await app.inject("/stats")).json()).toEqual({ counts: {}, total: 0 });
+  });
+
+  it("stats returns 503 when Redis is unavailable", async () => {
+    const { deps } = fakeDeps({
+      stats: {
+        counts: async () => {
+          throw new Error("redis timed out after 1000 ms");
+        },
+      },
+    });
+    app = buildServer(deps);
+    expect((await app.inject("/stats")).statusCode).toBe(503);
   });
 
   it("metrics include default, request and publish metrics", async () => {

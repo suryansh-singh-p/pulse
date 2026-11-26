@@ -1,6 +1,6 @@
 import { loadConfig } from "@pulse/shared";
 import { createKafka, kafkaCheck, kafkaPublisher } from "./kafka.js";
-import { createRedis, redisCheck } from "./redis.js";
+import { createRedis, redisCheck, redisStats } from "./redis.js";
 import { buildServer } from "./server.js";
 
 const config = loadConfig();
@@ -13,6 +13,7 @@ const app = buildServer(
   {
     publisher: kafkaPublisher(producer),
     checks: { kafka: kafkaCheck(admin), redis: redisCheck(redis) },
+    stats: redisStats(redis),
   },
   { logger: true },
 );
