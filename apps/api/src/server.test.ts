@@ -119,6 +119,16 @@ describe("api", () => {
     expect((await app.inject("/stats")).statusCode).toBe(503);
   });
 
+  it("serves the demo page at /", async () => {
+    app = buildServer(fakeDeps().deps);
+    const res = await app.inject("/");
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toContain("text/html");
+    expect(res.headers["cache-control"]).toBe("no-store");
+    expect(res.body).toContain("<title>Pulse demo</title>");
+    expect(res.body).not.toContain("%VERSION%"); // the placeholder was filled in
+  });
+
   it("metrics include default, request and publish metrics", async () => {
     app = buildServer(fakeDeps().deps);
     await app.inject("/healthz");
