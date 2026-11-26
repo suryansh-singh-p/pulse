@@ -1,0 +1,32 @@
+# Tells ArgoCD to deploy the plain manifests in deploy/infra/ (Kafka, Redis, MinIO and
+# their setup Jobs) into the pulse namespace, next to the api.
+# Separate from the "pulse" Application because they change at a different pace:
+# the api is redeployed often, the data services rarely.
+# Applied once with kubectl; after that, change infra through Git.
+# Needs the minio-credentials Secret, created by hand (see deploy/README.md).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: pulse-infra
+  namespace: argocd
+  annotations:
+    # Compare using the API server's view of the objects (with defaults filled in).
+    # Avoids false OutOfSync on StatefulSets, whose volumeClaimTemplates gain defaults.
+    argocd.argoproj.io/compare-options: ServerSideDiff=true
+  # No resources finalizer, unlike "pulse": deleting this Application leaves Kafka,
+  # Redis and MinIO (and their data) running instead of deleting them.
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/suryansh-singh-p/pulse.git
+    targetRevision: main
+    path: deploy/infra # plain YAML files, no Helm
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: pulse # the chart's short names (kafka, redis, minio) only resolve within one namespace
+  syncPolicy:
+    automated:
+      prune: true # removed from Git -> removed from the cluster (PVCs are kept)
+      selfHeal: true # changed in the cluster -> changed back to Git
+    syncOptions:
+      - CreateNamespace=true
