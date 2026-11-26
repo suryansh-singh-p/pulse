@@ -8,7 +8,7 @@
 image:
   repository: ghcr.io/suryansh-singh-p/pulse-api
   # Commit SHA built by release.yaml. Deploy = change this; rollback = git revert.
-  tag: 8d03fac3df0974e8e52974edf0ade0f5a39c6f9a
+  tag: c53e33bdc807b5b68265263a3181798efc49c684
   # The SHA tag never changes, so pulling once per node is enough.
   pullPolicy: IfNotPresent
 
@@ -37,7 +37,7 @@ pdb:
 worker:
   # Off until image.tag points at a commit that has a pulse-worker image
   # (the worker image was first built with PR #6). Switched on with the tag bump.
-  enabled: false
+  enabled: true
   replicaCount: 2 # 3 partitions split 2 + 1 between the two workers
   image:
     repository: ghcr.io/suryansh-singh-p/pulse-worker
