@@ -1,18 +1,54 @@
 import { afterEach, describe, expect, it } from "vitest";
+import type { StoredEvent } from "@pulse/shared";
+import type { Deps } from "./deps.js";
 import { buildServer } from "./server.js";
 
 let app: ReturnType<typeof buildServer>;
 afterEach(() => app?.close());
 
+/** Fakes for Kafka and Redis: no real services needed, in tests or in CI. */
+function fakeDeps(overrides: Partial<Deps> = {}) {
+  const published: StoredEvent[] = [];
+  const deps: Deps = {
+    publisher: {
+      publish: async (event) => {
+        published.push(event);
+      },
+    },
+    checks: { kafka: async () => {}, redis: async () => {} },
+    ...overrides,
+  };
+  return { deps, published };
+}
+
 describe("api", () => {
-  it("healthz and readyz return 200", async () => {
-    app = buildServer();
+  it("healthz and readyz return 200 when dependencies are up", async () => {
+    app = buildServer(fakeDeps().deps);
     expect((await app.inject("/healthz")).statusCode).toBe(200);
     expect((await app.inject("/readyz")).statusCode).toBe(200);
   });
 
-  it("accepts a valid event with id and timestamp", async () => {
-    app = buildServer();
+  it("readyz returns 503 and names the failing dependency", async () => {
+    const { deps } = fakeDeps({
+      checks: {
+        kafka: async () => {
+          throw new Error("kafka timed out after 1000 ms");
+        },
+        redis: async () => {},
+      },
+    });
+    app = buildServer(deps);
+    const res = await app.inject("/readyz");
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toEqual({
+      status: "not ready",
+      failed: { kafka: "kafka timed out after 1000 ms" },
+    });
+  });
+
+  it("publishes a valid event and returns 202 with its id", async () => {
+    const { deps, published } = fakeDeps();
+    app = buildServer(deps);
     const res = await app.inject({
       method: "POST",
       url: "/events",
@@ -22,29 +58,54 @@ describe("api", () => {
     const body = res.json();
     expect(body.id).toMatch(/^[0-9a-f-]{36}$/);
     expect(new Date(body.receivedAt).toISOString()).toBe(body.receivedAt);
+
+    expect(published).toHaveLength(1);
+    expect(published[0]).toMatchObject({ id: body.id, type: "click", userId: "u1", props: {} });
   });
 
-  it("rejects an invalid event with 400", async () => {
-    app = buildServer();
+  it("returns 503 with Retry-After when publishing fails", async () => {
+    const { deps } = fakeDeps({
+      publisher: {
+        publish: async () => {
+          throw new Error("kafka send timed out after 3000 ms");
+        },
+      },
+    });
+    app = buildServer(deps);
+    const res = await app.inject({
+      method: "POST",
+      url: "/events",
+      payload: { type: "click", userId: "u1" },
+    });
+    expect(res.statusCode).toBe(503);
+    expect(res.headers["retry-after"]).toBe("5");
+  });
+
+  it("rejects an invalid event with 400 and publishes nothing", async () => {
+    const { deps, published } = fakeDeps();
+    app = buildServer(deps);
     const res = await app.inject({
       method: "POST",
       url: "/events",
       payload: { type: "nope", userId: "" },
     });
     expect(res.statusCode).toBe(400);
+    expect(published).toHaveLength(0);
   });
 
   it("stats returns an empty object", async () => {
-    app = buildServer();
+    app = buildServer(fakeDeps().deps);
     expect((await app.inject("/stats")).json()).toEqual({});
   });
 
-  it("metrics include default and request metrics", async () => {
-    app = buildServer();
+  it("metrics include default, request and publish metrics", async () => {
+    app = buildServer(fakeDeps().deps);
     await app.inject("/healthz");
+    await app.inject({ method: "POST", url: "/events", payload: { type: "click", userId: "u1" } });
     const text = (await app.inject("/metrics")).body;
     expect(text).toContain("process_cpu_user_seconds_total");
     expect(text).toContain('http_requests_total{method="GET",route="/healthz",status="200"} 1');
     expect(text).toContain("http_request_duration_seconds_bucket");
+    expect(text).toContain('events_published_total{result="ok"} 1');
   });
 });

@@ -1,0 +1,131 @@
+# Local development stack: Kafka, Redis, MinIO and the api.
+# Run from the repo root:
+#   docker compose -f deploy/compose.yaml up -d --build
+# Credentials come from deploy/.env (gitignored); copy deploy/.env.example to start.
+name: pulse
+
+services:
+  kafka:
+    image: apache/kafka:4.4.0
+    # Setting any KAFKA_* variable turns off the image's built-in config,
+    # so the whole single-node KRaft config is spelled out here.
+    environment:
+      CLUSTER_ID: pulse-local-cluster-01 # fixed, so restarts reuse the same metadata
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller # one node does both (KRaft, no ZooKeeper)
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # Where the broker listens (inside the container)...
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      # ...and the address it tells clients to reconnect to. Containers use kafka:9092;
+      # the laptop uses localhost:9094 (published below). Inside a container,
+      # "localhost" is the container itself, so it must never be advertised to them.
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # One broker: internal topics can only have one copy (defaults expect 3).
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Topics are created on purpose by kafka-init. Auto-creation would silently
+      # make events.raw with 1 partition if the api produced first.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      # Start consumer-group rebalances immediately (default waits 3 s).
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs # container filesystem: kept across stop/start, gone on down
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx512m # keep the JVM small on a laptop
+    ports:
+      - "9094:9094" # EXTERNAL listener only; 9092 stays inside the Compose network
+    healthcheck:
+      # Healthy = the broker answers a real client request, not just "the process is up".
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s # JVM startup; failures in this window don't count
+
+  # One-shot: creates the topic, then exits 0. Safe to run again (--if-not-exists).
+  kafka-init:
+    image: apache/kafka:4.4.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/opt/kafka/bin/kafka-topics.sh"]
+    command:
+      - --bootstrap-server
+      - kafka:9092
+      - --create
+      - --if-not-exists
+      - --topic
+      - events.raw
+      - --partitions
+      - "3" # unit of parallelism: up to 3 workers in one group
+      - --replication-factor
+      - "1" # one broker, so one copy
+    restart: "no"
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"] # every write logged to disk
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: bitnamilegacy/minio:2025.7.23-debian-12-r5
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in deploy/.env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in deploy/.env}
+      MINIO_DEFAULT_BUCKETS: pulse-events # Bitnami creates it at startup
+    ports:
+      - "9000:9000" # S3 API
+      - "9001:9001" # web console
+    volumes:
+      - minio-data:/bitnami/minio/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: .. # repo root, like CI: the Dockerfile copies both workspaces
+      dockerfile: apps/api/Dockerfile
+    image: pulse-api:compose
+    # The api exits if Kafka or Redis is unreachable at startup; Compose restarts it
+    # (Kubernetes does the same for pods).
+    restart: on-failure
+    environment:
+      PORT: "3000"
+      KAFKA_BROKERS: kafka:9092 # the internal listener
+      REDIS_URL: redis://redis:6379
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: pulse-events
+      AWS_REGION: us-east-1 # the S3 SDK requires a region; MinIO ignores it
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "3000:3000"
+    depends_on:
+      # Completed, not just "kafka healthy": the topic must exist before the first produce.
+      kafka-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      # The slim image has no curl; node's built-in fetch does the same job.
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-data:
+  minio-data:
