@@ -315,6 +315,68 @@
 - KafkaJS 2.2.4 (last release Feb 2023) logs `TimeoutNegativeWarning` on Node 24: `throttledUntil` starts at -1, so `-1 - Date.now()` is passed to `setTimeout`. Harmless (Node uses 1 ms).
 - PowerShell: use `Invoke-RestMethod` for JSON POSTs (curl.exe quoting), and a `dc` function for `docker compose -f deploy/compose.yaml`.
 
+## 2026-11-26 — Kafka on Kubernetes, the worker, and code to pods through Git
+
+**Built**
+
+- `deploy/infra/kafka.yaml`: Kafka 4.4.0 as a StatefulSet (1 broker, KRaft) with a 2 Gi PVC for its log directory, so topics and committed offsets survive pod restarts. Headless Service `kafka`; the broker advertises its stable per-pod name `kafka-0.kafka:9092`. Heap 256–512 MB, memory limit 1 Gi. TCP readiness probe.
+- `deploy/infra/kafka-topic-job.yaml` creates `events.raw` (3 partitions). It and the existing `minio-create-bucket` Job are ArgoCD `PostSync` hooks with `BeforeHookCreation`: re-run after every sync, both idempotent.
+- `deploy/argocd/infra-application.yaml`: Application `pulse-infra` for `deploy/infra/` (plain YAML), namespace `pulse`, automated prune + self-heal, `ServerSideDiff=true`, no resources finalizer (deleting it leaves the data running). It adopted the hand-applied Redis and MinIO without restarting them (PR #7).
+- Chart 0.2.0 (PR #8): worker Deployment behind `worker.enabled`, using the api's ConfigMap and Secret and, by default, the api's image tag. Own name label `pulse-worker`, no Service, no probes, `terminationGracePeriodSeconds: 30` (above the worker's 20 s shutdown). Added the missing `AWS_REGION`. Merged with the worker off: the api pods rolled once (config checksum), same image.
+- First real release (PR #9): `image.tag` from `8d03fac` (pre-Kafka api) to `c53e33b`, worker on with 2 replicas (partitions split 2 + 1) and a 10 s flush.
+- Demo page (PR #10): `GET /` serves one HTML page from a `.ts` module (so it is compiled into `dist/` and the image). Buttons `POST /events` (users `user-1`…`user-20`, so all partitions get work), a 100-event burst, `/stats` polled every 2 s, values rendered with `textContent`, `cache-control: no-store`. The chart passes the image tag as `APP_VERSION`, shown on the page. Released in PR #11 (`0f5c449`).
+- Root `README.md` (architecture and delivery diagrams, screenshots in `docs/images/`, how to run, decisions, limitations), `deploy/README.md` rewritten for ArgoCD, `deploy/.env.example` re-added (PR #12 and this one).
+
+**Who watches what**
+
+- GitHub Actions watches merges to `main` and builds images from `apps/`. Every merge adds `pulse-api:<sha>` and `pulse-worker:<sha>` to GHCR; nothing runs them yet.
+- ArgoCD watches `deploy/helm/pulse/` and `deploy/infra/` on `main`, renders them, and applies the difference. It never looks at `apps/`.
+- The only link between the two is `image.tag` in `values-dev.yaml`. The tag decides *which* code runs; every other chart value decides *how* it runs.
+- So a code-only PR changes nothing in the cluster (PR #6); a settings PR restarts pods on the same image (PR #8, and PR #10's `APP_VERSION`); a tag PR deploys new code (PRs #9, #11). Until PR #9, the cluster ran the ArgoCD-day image while every newer commit only ran in Compose, which builds from local files.
+- Release = two merges, because the tag is the SHA of a merge commit that doesn't exist until the code PR is merged. Companies keep the two steps but let a bot open the tag PR (auto-merged for dev, approved for prod), or use ArgoCD Image Updater.
+- ArgoCD's "Synced to `b9e1794`" is the commit it read the chart from; the image tag inside is a different commit (`c53e33b`).
+- Runtime vs deploy coupling: the api and worker are decoupled at runtime (Kafka buffers, either side can be down or scaled), but share one tag because they share the `StoredEvent` contract. `worker.image.tag` can split them; then the event schema must stay backward compatible.
+
+**Drills**
+
+### Drill — Code to pods
+
+- **Action:** merge a code PR, wait for `release.yaml`, merge a PR that sets `image.tag` to the new SHA; watch the ArgoCD tree and `kubectl get pods -n pulse -w`.
+- **Expected:** a new ReplicaSet for the api and for the worker; pods replaced one at a time; the demo page's version changes to the new SHA after a reload.
+- **Lesson:** CI builds, Git decides, ArgoCD applies.
+
+### Drill — Worker pod deleted
+
+- **Action:** `kubectl delete pod -n pulse <a pulse-worker pod>` while sending events from the demo page.
+- **Expected:** the worker leaves the group cleanly (SIGTERM → flush → commit), the other worker briefly takes all 3 partitions, the replacement pod rejoins and the partitions are split again. Counts and files keep growing; nothing is lost.
+- **Lesson:** a consumer group rebalances around missing members; graceful shutdown avoids duplicates.
+
+### Drill — Kafka pod deleted
+
+- **Action:** `kubectl delete pod -n pulse kafka-0`, then `/readyz` and a demo-page click; wait for `kafka-0` to be 1/1.
+- **Expected:** the StatefulSet recreates `kafka-0` with the same name and the same PVC. Meanwhile `/readyz` is 503 (`failed.kafka`) and `POST /events` returns 503; workers exit and are restarted. Afterwards the topic and the group's committed offsets are still there, and the workers resume where they stopped.
+- **Lesson:** stable identity + persistent volume is why stateful services are StatefulSets.
+
+### Drill — Roll back a release
+
+- **Action:** `git revert` the demo-page release commit on a branch, PR, merge.
+- **Expected:** the api and worker go back to `c53e33b` (the previous ReplicaSets are reused); `GET /` returns 404 again.
+- **Lesson:** rollback is a commit, and the old image never left GHCR.
+
+**Gotchas**
+
+- A headless Service publishes DNS names only for Ready pods, but Kafka must resolve `kafka-0.kafka` to become Ready. Fix: `publishNotReadyAddresses: true`.
+- `apache/kafka` turns every `KAFKA_*` environment variable into broker config, and Kubernetes can inject `KAFKA_PORT` etc. for Services: `enableServiceLinks: false`.
+- The JVM uses memory outside the heap: a memory limit at or below `-Xmx` gets the pod OOMKilled.
+- A Job's pod template can't be changed after creation, so a Job managed as a normal ArgoCD resource eventually fails to sync. Hooks are deleted and re-created instead.
+- Label selectors match any pod that has *at least* their labels. Worker pods carrying `name: pulse, instance: pulse` would have received the api Service's traffic and counted towards its PDB. And a Deployment's selector is immutable, so the api's couldn't be narrowed instead: the worker got its own `name` label.
+- No `pulse-worker` image exists for commits before PR #6, so the worker was enabled in the same PR as the tag bump.
+- The chart never set `AWS_REGION`: the old api didn't use S3, but the S3 SDK requires a region.
+- `kubectl get pods,pvc -w`: watch takes one resource type.
+- `gh pr checks` without a number finds the PR from the current branch (none on `main`); right after `gh pr create` it can say "no checks reported". `gh pr merge` while checks are pending is blocked by the ruleset; switching back to `main` then makes the branch's files "disappear" until the PR is merged.
+- `kubectl port-forward svc/...` dies when the pod behind it is replaced; restart it after a rollout.
+- The Bitnami MinIO console (9001) isn't served in the cluster pod; inspect the bucket with `mc` inside `minio-0` instead.
+
 ## Open items
 
 - App ignores `LOG_LEVEL` (not in the config schema; Fastify logger is fixed at info).
@@ -327,9 +389,12 @@
 - `suryansh-admin`'s access key is full admin with no expiry: deactivate it when AWS isn't in use.
 - `pulse-s3` is created by hand; replace with Sealed Secrets or External Secrets Operator so it's reproducible from Git.
 - HPA is off in dev for the GitOps drills; turn it back on (with `replicas` left out of Git).
-- ArgoCD itself was installed with kubectl; manage it from Git too (app-of-apps), along with Redis and MinIO.
+- ArgoCD itself and its two Applications are applied with kubectl; manage them from Git too (app-of-apps).
 - Change the ArgoCD admin password (or disable admin and use SSO) and delete `argocd-initial-admin-secret`.
 - KafkaJS is unmaintained; move to `@confluentinc/kafka-javascript` (KafkaJS-compatible API on librdkafka).
 - De-duplicate counts by event `id` in Redis (`SET seen:<id> NX EX ...`) to make counting effectively exactly-once.
 - No dead-letter queue: invalid events are only logged and skipped.
-- Kafka and the worker exist only in Compose. The kind/ArgoCD api still runs the old `8d03fac` image; bumping its tag will CrashLoop until Kafka (and Redis/MinIO config) exist in the cluster.
+- Release tag bumps are manual PRs. Automate with a bot PR from `release.yaml` (needs a GitHub App or personal token: PRs opened with `GITHUB_TOKEN` don't trigger CI, so required checks would never run) or ArgoCD Image Updater.
+- The worker has no liveness probe: a hung worker (not crashed) wouldn't be restarted. Add a heartbeat file or a small `/healthz`.
+- Monitoring not done yet: kube-prometheus-stack, a ServiceMonitor for the api's `/metrics`, a Grafana dashboard (req/s, error %, p95, restarts) and an error-rate PrometheusRule.
+- Kafka is one broker with replication factor 1: no fault tolerance.
