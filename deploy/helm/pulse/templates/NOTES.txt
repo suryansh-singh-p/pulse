@@ -9,3 +9,8 @@ Reach the API on http://localhost:3000:
 Then try:
   curl localhost:3000/healthz
   curl localhost:3000/readyz
+{{- if .Values.worker.enabled }}
+
+Worker ({{ .Values.worker.replicaCount }} replicas) logs:
+  kubectl logs -n {{ .Release.Namespace }} deployment/{{ include "pulse.workerName" . }} -f
+{{- end }}
