@@ -253,10 +253,71 @@
 - Pods showed `running 0/1` for the first seconds: readiness got "connection refused" while Node started, then `/readyz` returned 200.
 - Public repo and public GHCR package: no repo credentials and no `imagePullSecrets` needed.
 
+## 2026-11-26 — Kafka: producer, worker and stats
+
+**Built**
+
+- `deploy/compose.yaml` (project `pulse`): Kafka 4.4.0 in single-node KRaft mode (broker + controller, no ZooKeeper), a one-shot `kafka-init` that creates `events.raw` (3 partitions, replication factor 1), Redis, MinIO (bucket via `MINIO_DEFAULT_BUCKETS`), the api and the worker. Credentials from `deploy/.env` (gitignored; `.env.example` committed).
+- Kafka listeners: `PLAINTEXT` `:9092` advertised as `kafka:9092` for containers, `EXTERNAL` `:9094` advertised as `localhost:9094` for the laptop, `CONTROLLER` `:9093` for KRaft only.
+- The api waits for `kafka-init` to complete (not just Kafka healthy), and auto topic creation is off, so `events.raw` can't silently appear with 1 partition.
+- api producer (KafkaJS): one producer at startup, `DefaultPartitioner` (murmur2, same as the Java client), key = `userId`, `acks: -1`, 2 short retries and a 3 s send timeout → 202 only after Kafka's ack, otherwise 503 + `Retry-After: 5`. `/readyz` runs a Kafka metadata request and a Redis PING in parallel, 1 s timeout each, and names what failed. Shutdown: close the server, then disconnect the producer, then Redis. Kafka and Redis are injected through small interfaces (`deps.ts`), so tests and CI use fakes.
+- Shared contract in `@pulse/shared`: the `StoredEvent` zod schema plus `EVENTS_TOPIC` and `COUNTS_KEY`.
+- `apps/worker`: consumer group `pulse-worker`, auto-commit off. Per batch: validate (invalid → log and skip), one Redis pipeline of `HINCRBY counts <type> n`, buffer, record the next offset per partition. Flush at 500 events or 30 s: one NDJSON file at `raw/dt=YYYY-MM-DD/hour=HH/<uuid>.ndjson` (S3 SDK, `forcePathStyle` for MinIO), then commit. Flushes are serialized; 3 failed writes or any Redis/consumer error → exit without committing.
+- `GET /stats` → `{ counts, total }` from `HGETALL counts`, 503 if Redis fails.
+- Worker Dockerfile (same multi-stage pattern); both Dockerfiles build only their own workspace. CI's `image` job builds and scans both images; `release.yaml` pushes `pulse-api` and `pulse-worker`.
+
+**How partitioning works**
+
+- The producer picks the partition, not the broker: `positive(murmur2(key)) % partitions`. alice and bob → 0, carol → 2; the same key always lands on the same partition, so a user's events stay in order.
+- Order holds only within a partition. The console consumer printed all of partition 0, then partition 2, so carol's 3rd event came out last.
+- Adding partitions changes `% partitions` and moves keys (alice would go to 1 with 4 partitions), breaking per-key order across the change.
+
+**Drills**
+
+### Drill — End to end
+
+- **Did:** sent 1,000 events (types rotating, 50 users).
+- **Saw:** `/stats` total 1009 (9 + 1000; click 340, page_view 333, purchase 336). Worker flushed `events: 500, reason: size` twice; lag 0 on all partitions; NDJSON files in MinIO under `raw/dt=.../hour=.../`.
+
+### Drill — Consumer groups
+
+- **Did:** `docker compose up -d --scale worker=2`, then sent 300 events.
+- **Saw:** a rebalance (KafkaJS logs "The group is rebalancing, so a rejoin is needed" at ERROR level, but it's normal), then worker-2 flushed 78 and worker-1 flushed 222: the partitions were split between them, unevenly because the 50 users don't hash evenly. Total 1309.
+
+### Drill — Crash safety
+
+- **Did:** sent 500 events and immediately `docker compose kill worker` (SIGKILL, both workers, before the 30 s flush).
+- **Saw:** `/stats` already 1809 (counted on read). Consumer group: "no active members", LAG 150 / 130 / 220 = 500, committed offsets 396 / 340 / 573 (sum 1309 = everything flushed before the crash), log-end offsets 546 / 470 / 793 (sum 1809 = everything sent). After `docker compose start worker`: LAG 0, the 500 written to S3 once, `/stats` 2309.
+- **Lesson:** at-least-once. Committed offsets live in Kafka, so nothing was lost; the counter over-counted by exactly the uncommitted 500. Event ids would make the counter idempotent (`SET seen:<id> NX`).
+- `docker kill` counts as a manual stop, so `restart: on-failure` didn't restart the workers; a real crash would have been restarted.
+
+### Drill — More workers than partitions
+
+- **Action:** `--scale worker=4`, then `kafka-consumer-groups.sh --describe --group pulse-worker --members`.
+- **Expected:** 4 members, one with `#PARTITIONS 0`.
+- **Lesson:** a partition goes to one consumer per group, so partitions cap parallelism; an extra worker is an idle standby that takes over if another dies.
+
+### Drill — Kafka down
+
+- **Action:** `docker compose stop kafka`, then `/readyz`, `/stats` and `POST /events`; then `docker compose start kafka`.
+- **Expected:** `/readyz` 503 with `failed.kafka`, `POST /events` 503 after about 3 s, `/stats` still 200 (Redis only), workers exiting and restarting. After Kafka is back: everything recovers without manual steps.
+- **Lesson:** fail fast with a clear temporary error, recover automatically.
+
+**Gotchas**
+
+- Listeners: the advertised address must be reachable from where the client runs. Advertising only `localhost` breaks every container client ("localhost" inside a container is the container itself).
+- `apache/kafka`: setting any `KAFKA_*` variable drops the image's built-in config, so the whole KRaft config has to be spelled out; internal topics need replication factor 1 on a single broker.
+- Auto topic creation would have created `events.raw` with 1 partition if the api produced before `kafka-init` ran.
+- ioredis queues commands while disconnected, so a PING with Redis down hangs; `enableOfflineQueue: false` makes it fail fast.
+- KafkaJS: `stop()`/`disconnect()` make `commitOffsets` throw, so shutdown must pause → finish the batch → flush → commit → disconnect. After a crash it restarts the consumer itself while old events are still buffered; the worker exits instead.
+- The api Dockerfile ran `npm run build`, which built every workspace, including the worker whose deps aren't installed in that image. Found by building the image locally before pushing.
+- CI: a matrix would rename the required check to `image (api)` / `image (worker)` and block every PR; both images build in the one `image` job instead, with separate GHA cache scopes so they don't overwrite each other.
+- KafkaJS 2.2.4 (last release Feb 2023) logs `TimeoutNegativeWarning` on Node 24: `throttledUntil` starts at -1, so `-1 - Date.now()` is passed to `setTimeout`. Harmless (Node uses 1 ms).
+- PowerShell: use `Invoke-RestMethod` for JSON POSTs (curl.exe quoting), and a `dc` function for `docker compose -f deploy/compose.yaml`.
+
 ## Open items
 
 - App ignores `LOG_LEVEL` (not in the config schema; Fastify logger is fixed at info).
-- `/readyz` doesn't check Redis or Kafka yet; `/stats` returns `{}`.
 - Decide on `prom-client` vs `@prometheus-io/client`.
 - Bitnami legacy MinIO images get no updates; revisit before anything beyond local.
 - Add Dependabot (npm, Dockerfile base image, GitHub Actions) so stale pins arrive as PRs.
@@ -268,3 +329,7 @@
 - HPA is off in dev for the GitOps drills; turn it back on (with `replicas` left out of Git).
 - ArgoCD itself was installed with kubectl; manage it from Git too (app-of-apps), along with Redis and MinIO.
 - Change the ArgoCD admin password (or disable admin and use SSO) and delete `argocd-initial-admin-secret`.
+- KafkaJS is unmaintained; move to `@confluentinc/kafka-javascript` (KafkaJS-compatible API on librdkafka).
+- De-duplicate counts by event `id` in Redis (`SET seen:<id> NX EX ...`) to make counting effectively exactly-once.
+- No dead-letter queue: invalid events are only logged and skipped.
+- Kafka and the worker exist only in Compose. The kind/ArgoCD api still runs the old `8d03fac` image; bumping its tag will CrashLoop until Kafka (and Redis/MinIO config) exist in the cluster.
