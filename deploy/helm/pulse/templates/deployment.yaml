@@ -73,6 +73,10 @@ spec:
                 name: {{ include "pulse.fullname" . }}-config
             - secretRef:
                 name: {{ include "pulse.s3SecretName" . }}
+          env:
+            # The running release, shown on the demo page.
+            - name: APP_VERSION
+              value: {{ .Values.image.tag | default .Chart.AppVersion | quote }}
           lifecycle:
             # Keep serving while the pod is removed from Service endpoints,
             # then SIGTERM starts the app's graceful shutdown.

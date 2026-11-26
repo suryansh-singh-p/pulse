@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyServerOptions } from "fastify";
 import { Counter, Histogram, Registry, collectDefaultMetrics } from "prom-client";
 import { EventIn, type StoredEvent } from "@pulse/shared";
+import { demoPage } from "./demo-page.js";
 import type { Deps } from "./deps.js";
 
 export function buildServer(deps: Deps, opts: FastifyServerOptions = {}) {
@@ -40,6 +41,14 @@ export function buildServer(deps: Deps, opts: FastifyServerOptions = {}) {
     };
     requests.inc(labels);
     duration.observe(labels, reply.elapsedTime / 1000);
+  });
+
+  // Demo page. APP_VERSION is the image tag, set by the Helm chart, so the page shows
+  // which release is running. Built once: it never changes while the process runs.
+  const page = demoPage(process.env.APP_VERSION ?? "dev");
+  app.get("/", async (_req, reply) => {
+    // no-store: after a deploy, a reload shows the new version straight away.
+    return reply.type("text/html; charset=utf-8").header("cache-control", "no-store").send(page);
   });
 
   // Liveness: the process is up.
