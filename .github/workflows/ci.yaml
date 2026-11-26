@@ -41,11 +41,13 @@ jobs:
       - run: npm run test
       - run: npm run build
 
+  # One job for both images, not a matrix: a matrix would rename the check to
+  # "image (api)" / "image (worker)", and the ruleset requires a check named "image".
   image:
-    # Only build an image of code that passed the checks.
+    # Only build images of code that passed the checks.
     needs: test
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       # New VM: nothing from the test job is here.
       - uses: actions/checkout@v7
@@ -56,17 +58,19 @@ jobs:
       - name: Build api image
         uses: docker/build-push-action@v7
         with:
-          context: . # repo root: the Dockerfile copies the lockfile and both workspaces
+          context: . # repo root: the Dockerfile copies the lockfile and the workspaces
           file: apps/api/Dockerfile
           tags: pulse-api:ci # local name for the scan below
           load: true # put the image in this runner's Docker so Trivy can see it
           push: false # PR images never reach the registry
-          cache-from: type=gha
-          cache-to: type=gha,mode=max # mode=max also caches the build stage's layers
+          # One cache scope per image; with the default shared scope, each build
+          # would overwrite the other's cache. mode=max also caches build-stage layers.
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,scope=api,mode=max
 
       # Third-party action pinned to a full commit SHA (v0.36.0): a tag can be
       # moved to different code, a commit SHA cannot.
-      - name: Scan image with Trivy
+      - name: Scan api image with Trivy
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: pulse-api:ci
@@ -74,3 +78,24 @@ jobs:
           severity: CRITICAL
           ignore-unfixed: true # nothing to do about a CVE with no fixed version yet
           exit-code: "1" # default is 0 (report only); 1 fails the job on findings
+
+      - name: Build worker image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/worker/Dockerfile
+          tags: pulse-worker:ci
+          load: true
+          push: false
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,scope=worker,mode=max
+
+      - name: Scan worker image with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: pulse-worker:ci
+          scanners: vuln
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          skip-setup-trivy: true # already installed by the api scan above

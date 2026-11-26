@@ -18,12 +18,12 @@ concurrency:
 
 env:
   # Registry paths must be lowercase; this owner name already is.
-  IMAGE: ghcr.io/${{ github.repository_owner }}/pulse-api
+  REGISTRY: ghcr.io/${{ github.repository_owner }}
 
 jobs:
   push-image:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -46,11 +46,27 @@ jobs:
           push: true
           # SHA: immutable, what ArgoCD deploys. main: moves, for quick manual pulls.
           tags: |
-            ${{ env.IMAGE }}:${{ github.sha }}
-            ${{ env.IMAGE }}:main
+            ${{ env.REGISTRY }}/pulse-api:${{ github.sha }}
+            ${{ env.REGISTRY }}/pulse-api:main
           # Links the package to this repo on GitHub.
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Same scopes as ci.yaml: PR builds can reuse caches written on main.
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,scope=api,mode=max
+
+      - name: Build and push worker image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/worker/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/pulse-worker:${{ github.sha }}
+            ${{ env.REGISTRY }}/pulse-worker:main
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,scope=worker,mode=max
