@@ -26,3 +26,6 @@ tfplan
 *.tfplan
 crash.log
 secrets.tfvars
+
+# Personal build log, kept locally only
+JOURNAL.md

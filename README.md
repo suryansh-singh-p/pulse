@@ -105,7 +105,6 @@ deploy/infra/         Kafka, Redis, MinIO manifests
 deploy/argocd/        The two ArgoCD Applications
 terraform/            AWS S3 bucket and IAM
 .github/workflows/    CI and release
-JOURNAL.md            Day-by-day build log: decisions, problems, drills
 ```
 
 ## Run it
@@ -169,5 +168,3 @@ The MinIO password must be at least 8 characters and URL-safe. ArgoCD deploys fr
 - **At-least-once counts.** After a crash, Redis counts can be slightly too high. Fix: de-duplicate by event id.
 - **KafkaJS is no longer maintained.** Alternative: `@confluentinc/kafka-javascript`.
 - **The api has no authentication.** It's a local demo.
-
-See [JOURNAL.md](JOURNAL.md) for how each part was built, including failure drills (killed workers, bad images, rollbacks, drift).

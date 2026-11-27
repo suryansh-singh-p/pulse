@@ -89,8 +89,12 @@ spec:
             - name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS
               value: "0"
             # On the PVC, so topics and committed offsets survive a pod restart.
+            # Not /var/lib/kafka/data: the image declares that path as a VOLUME, so the
+            # container runtime mounts a fresh, throwaway volume there on top of the PVC,
+            # and everything written to it is lost when the container is recreated.
+            # A folder the image doesn't declare stays on the PVC.
             - name: KAFKA_LOG_DIRS
-              value: /var/lib/kafka/data
+              value: /var/lib/kafka/logs
             # Heap stays small; the memory limit below is higher because the JVM also
             # uses memory outside the heap. Limit <= heap would get the pod OOMKilled.
             - name: KAFKA_HEAP_OPTS
@@ -117,6 +121,7 @@ spec:
               cpu: "1"
               memory: 1Gi
           volumeMounts:
+            # The PVC root. Kafka writes to the logs/ folder inside it (KAFKA_LOG_DIRS).
             - name: data
               mountPath: /var/lib/kafka
   # One PVC per pod, named data-kafka-0. Survives pod deletion.
